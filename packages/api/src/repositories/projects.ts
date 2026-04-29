@@ -28,13 +28,22 @@ function normalizeWindowsPath(value: string): string {
   return value.replaceAll("/", "\\");
 }
 
+function resolveHostProjectsDir(hostProjectsDir: string): string {
+  if (isAbsolute(hostProjectsDir)) return resolve(hostProjectsDir);
+
+  const hostRoot = process.env.PROJECTS_HOST_ROOT?.trim();
+  return hostRoot && isAbsolute(hostRoot)
+    ? resolve(hostRoot, hostProjectsDir)
+    : resolve(hostProjectsDir);
+}
+
 function mapHostProjectPathToContainer(rootPath: string): string {
   const hostProjectsDir = process.env.PROJECTS_DIR?.trim();
   if (!hostProjectsDir) return rootPath;
 
   const containerProjectsMount = readContainerProjectsMount();
   const resolvedRootPath = resolve(rootPath);
-  const resolvedHostProjectsDir = resolve(hostProjectsDir);
+  const resolvedHostProjectsDir = resolveHostProjectsDir(hostProjectsDir);
 
   if (isWithinPath(resolvedHostProjectsDir, resolvedRootPath)) {
     const rel = relative(resolvedHostProjectsDir, resolvedRootPath);

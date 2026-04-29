@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import YAML from "yaml";
 import { projects, runtimeProfiles, tasks } from "@aif/shared";
 import { createTestDb } from "@aif/shared/server";
 
@@ -64,6 +66,7 @@ vi.mock("../ws.js", () => ({
 }));
 
 const { projectsRouter } = await import("../routes/projects.js");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 function createApp() {
   const app = new Hono();
@@ -144,6 +147,69 @@ describe("projects API", () => {
       projectRoot: "/home/www/demo",
       registry: expect.anything(),
     });
+  });
+
+  it("maps Docker quick-start project paths when compose provides default mount env", async () => {
+    const defaultHostProjectsDir = join(repoRoot, "projects");
+    vi.stubEnv("PROJECTS_DIR", defaultHostProjectsDir);
+    vi.stubEnv("PROJECTS_MOUNT", "/home/www");
+    const { initProject: initProjectMock } = await import("@aif/runtime");
+
+    const res = await app.request("/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Docker Default Project",
+        rootPath: join(defaultHostProjectsDir, "demo"),
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.rootPath).toBe("/home/www/demo");
+    expect(initProjectMock).toHaveBeenCalledWith({
+      projectRoot: "/home/www/demo",
+      registry: expect.anything(),
+    });
+  });
+
+  it("maps Docker project paths when PROJECTS_DIR is relative to the compose root", async () => {
+    vi.stubEnv("PROJECTS_DIR", "./.projects");
+    vi.stubEnv("PROJECTS_HOST_ROOT", repoRoot);
+    vi.stubEnv("PROJECTS_MOUNT", "/home/www");
+    const { initProject: initProjectMock } = await import("@aif/runtime");
+
+    const res = await app.request("/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Docker Relative Project",
+        rootPath: join(repoRoot, ".projects", "demo"),
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.rootPath).toBe("/home/www/demo");
+    expect(initProjectMock).toHaveBeenCalledWith({
+      projectRoot: "/home/www/demo",
+      registry: expect.anything(),
+    });
+  });
+
+  it("wires default Docker project mount env into the API service", () => {
+    const compose = YAML.parse(readFileSync(join(repoRoot, "docker-compose.yml"), "utf-8"));
+
+    expect(compose.services.api.environment).toEqual(
+      expect.arrayContaining([
+        "PROJECTS_DIR=${PROJECTS_DIR:-${PWD}/projects}",
+        "PROJECTS_HOST_ROOT=${PWD}",
+        "PROJECTS_MOUNT=${PROJECTS_MOUNT:-/home/www}",
+      ]),
+    );
+    expect(compose.services.api.volumes).toEqual(
+      expect.arrayContaining(["${PROJECTS_DIR:-${PWD}/projects}:${PROJECTS_MOUNT:-/home/www}"]),
+    );
   });
 
   it("maps Docker host project paths to the container project mount on update", async () => {
