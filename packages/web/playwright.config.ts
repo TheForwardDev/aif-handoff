@@ -27,7 +27,7 @@ export default defineConfig({
   webServer: process.env.AIF_SKIP_DEV_SERVER
     ? undefined
     : {
-        command: "npm run dev --prefix ../..",
+        command: "npm run dev --prefix ../.. -- --no-watch",
         url: "http://localhost:5180",
         reuseExistingServer: true,
         timeout: 120_000,

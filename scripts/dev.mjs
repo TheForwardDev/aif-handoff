@@ -64,6 +64,9 @@ function resolveMcpPort(value) {
 loadRootEnv();
 assertWorkspacePackagesResolveToSource();
 
+const rawArgs = process.argv.slice(2);
+const noWatch = rawArgs.includes("--no-watch") || process.env.AIF_DEV_NO_WATCH === "1";
+const forwardedArgs = rawArgs.filter((arg) => arg !== "--no-watch");
 const filters = ["@aif/api", "@aif/web", "@aif/agent"];
 const mcpPort = resolveMcpPort(process.env.MCP_PORT);
 
@@ -76,9 +79,9 @@ if (mcpPort) {
 const args = [
   "turbo",
   "run",
-  "dev",
+  noWatch ? "dev:serve" : "dev",
   ...filters.flatMap((filter) => ["--filter", filter]),
-  ...process.argv.slice(2),
+  ...forwardedArgs,
 ];
 
 spawnDev({
