@@ -386,6 +386,38 @@ and a runtime transport that advertises session fork support. TTL is bounded to
 
 Returns the same shape as `GET /projects/:id/warmup`.
 
+If at least one target warmup is created successfully and a later target fails,
+the endpoint returns `207 Multi-Status` with the active successful or previously
+ready warmups instead of treating the whole request as a cold failure:
+
+```json
+{
+  "error": "Runtime failed while creating warmup",
+  "code": "partial_warmup_failed",
+  "failedTarget": "implementer",
+  "partial": true,
+  "warmup": {
+    "id": "warmup-failed",
+    "status": "failed"
+  },
+  "warmups": [
+    {
+      "id": "warmup-ready",
+      "status": "ready"
+    }
+  ],
+  "support": {
+    "supported": true,
+    "workflowKind": "planner"
+  },
+  "targets": []
+}
+```
+
+Clients should treat `warmups` in a partial response as usable for the listed
+targets and retry only the failed/missing target instead of assuming all warmups
+were discarded.
+
 **Errors:**
 
 - `400` — invalid TTL.
@@ -393,6 +425,7 @@ Returns the same shape as `GET /projects/:id/warmup`.
 - `404` — project not found.
 - `409` — none of the effective warmup target runtimes support session fork.
 - `502` — runtime execution failed or did not return a seed session id.
+- `207` — partial success; at least one target warmup remains active while another target failed.
 
 **WebSocket event:** `project:warmup_updated` with `{ projectId, status }`.
 

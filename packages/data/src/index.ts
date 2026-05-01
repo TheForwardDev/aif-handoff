@@ -1979,7 +1979,8 @@ export function markRuntimeWarmupSessionReady(
       .get();
     if (!existing) return;
 
-    tx.update(runtimeWarmupSessions)
+    const readyUpdate = tx
+      .update(runtimeWarmupSessions)
       .set({
         status: "ready",
         sourceSessionId: input.sourceSessionId,
@@ -1989,8 +1990,9 @@ export function markRuntimeWarmupSessionReady(
         ...(input.ttlSeconds !== undefined ? { ttlSeconds: input.ttlSeconds } : {}),
         updatedAt: now,
       })
-      .where(eq(runtimeWarmupSessions.id, id))
+      .where(and(eq(runtimeWarmupSessions.id, id), eq(runtimeWarmupSessions.status, "creating")))
       .run();
+    if (readyUpdate.changes === 0) return;
 
     tx.update(runtimeWarmupSessions)
       .set({ status: "cleared", updatedAt: now })

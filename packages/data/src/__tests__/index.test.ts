@@ -1685,6 +1685,43 @@ describe("data layer", () => {
       );
     });
 
+    it("does not resurrect a cleared pending warmup when it finishes late", () => {
+      const first = createRuntimeWarmupSession({
+        ...scope,
+        ttlSeconds: 600,
+        expiresAt: "2026-04-30T13:00:00.000Z",
+        createdAt: "2026-04-30T12:00:00.000Z",
+      })!;
+      const second = createRuntimeWarmupSession({
+        ...scope,
+        ttlSeconds: 600,
+        expiresAt: "2026-04-30T13:05:00.000Z",
+        createdAt: "2026-04-30T12:01:00.000Z",
+      })!;
+
+      markRuntimeWarmupSessionReady(second.id, {
+        sourceSessionId: "seed-second",
+        updatedAt: "2026-04-30T12:02:00.000Z",
+      });
+      expect(findRuntimeWarmupSessionById(first.id)?.status).toBe("cleared");
+
+      const stale = markRuntimeWarmupSessionReady(first.id, {
+        sourceSessionId: "seed-first-late",
+        updatedAt: "2026-04-30T12:03:00.000Z",
+      });
+
+      expect(stale).toEqual(
+        expect.objectContaining({
+          id: first.id,
+          status: "cleared",
+          sourceSessionId: null,
+        }),
+      );
+      expect(findActiveReadyRuntimeWarmupSession(scope, "2026-04-30T12:04:00.000Z")?.id).toBe(
+        second.id,
+      );
+    });
+
     it("persists failed warmups without making them active", () => {
       const row = createRuntimeWarmupSession({
         ...scope,
