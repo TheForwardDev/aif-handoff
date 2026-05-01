@@ -147,6 +147,7 @@ export interface Task {
   runtimeLimitUpdatedAt?: string | null;
   scheduledAt: string | null;
   branchName: string | null;
+  worktreePath: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -339,6 +340,8 @@ export const RuntimeTransport = {
   SDK: "sdk",
   /** CLI subprocess — spawn a binary and parse stdout */
   CLI: "cli",
+  /** Codex app-server subprocess over stdio JSONL */
+  APP_SERVER: "app-server",
   /** HTTP API — POST to a remote runtime endpoint */
   API: "api",
 } as const;

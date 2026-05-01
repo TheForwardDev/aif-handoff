@@ -358,6 +358,7 @@ export interface RuntimeSessionListInput {
   providerId?: string;
   profileId?: string | null;
   projectRoot?: string;
+  transport?: RuntimeTransport;
   limit?: number;
   options?: Record<string, unknown>;
   headers?: Record<string, string>;
@@ -368,6 +369,7 @@ export interface RuntimeSessionGetInput {
   providerId?: string;
   profileId?: string | null;
   projectRoot?: string;
+  transport?: RuntimeTransport;
   sessionId: string;
   options?: Record<string, unknown>;
   headers?: Record<string, string>;

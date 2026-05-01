@@ -1,6 +1,14 @@
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import {
+  appendFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { logger } from "./logger.js";
 import { getProjectConfig, type AifProjectGit } from "./projectConfig.js";
 
@@ -17,7 +25,9 @@ export class BranchIsolationError extends Error {
     | "create_failed"
     | "invalid_branch_name"
     | "git_disabled_with_persisted_branch"
-    | "not_a_repo_with_persisted_branch";
+    | "not_a_repo_with_persisted_branch"
+    | "worktree_create_failed"
+    | "worktree_path_collision";
   readonly branchName: string | null;
   readonly projectRoot: string;
 
@@ -53,6 +63,21 @@ export interface EnsureFeatureBranchResult {
   reason?: string;
 }
 
+export interface EnsureTaskWorktreeInput {
+  projectRoot: string;
+  taskId: string;
+  title: string;
+  explicitBranchName?: string | null;
+  explicitWorktreePath?: string | null;
+}
+
+export interface EnsureTaskWorktreeResult {
+  action: "skipped" | "created" | "reused";
+  branchName: string | null;
+  worktreePath: string | null;
+  reason?: string;
+}
+
 const BRANCH_SLUG_MAX = 40;
 
 export function slugifyTitle(title: string): string {
@@ -71,6 +96,25 @@ export function buildBranchName(prefix: string, title: string, taskId: string): 
   const slug = slugifyTitle(title);
   const shortId = taskId.replace(/-/g, "").slice(0, 6);
   return `${normalizedPrefix}${slug}-${shortId}`;
+}
+
+function sanitizeWorktreeSegment(value: string): string {
+  const sanitized = value
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return sanitized || "task";
+}
+
+export function buildTaskWorktreePath(
+  projectRoot: string,
+  branchName: string,
+  taskId: string,
+): string {
+  const projectName = basename(projectRoot);
+  const branchSegment = sanitizeWorktreeSegment(branchName.replace(/\//g, "-"));
+  const taskSegment = sanitizeWorktreeSegment(taskId);
+  return resolve(dirname(projectRoot), `${projectName}-${branchSegment}-${taskSegment}`);
 }
 
 function runGit(
@@ -127,6 +171,30 @@ export function branchExists(projectRoot: string, branchName: string): boolean {
     { ignoreExit: true },
   );
   return status === 0;
+}
+
+function remoteBranchExists(projectRoot: string, branchName: string): boolean {
+  const { status } = runGit(
+    projectRoot,
+    ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branchName}`],
+    { ignoreExit: true },
+  );
+  return status === 0;
+}
+
+function getOriginHeadBranch(projectRoot: string): string | null {
+  const { stdout, status } = runGit(
+    projectRoot,
+    ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    {
+      ignoreExit: true,
+    },
+  );
+  if (status !== 0 || !stdout) return null;
+  const prefix = "refs/remotes/origin/";
+  if (!stdout.startsWith(prefix)) return null;
+  const branchName = stdout.slice(prefix.length).trim();
+  return branchName || null;
 }
 
 export function workingTreeClean(projectRoot: string): boolean {
@@ -208,9 +276,340 @@ function resolveGitConfig(projectRoot: string): AifProjectGit {
   return getProjectConfig(projectRoot).git;
 }
 
+function hasProjectConfigFile(projectRoot: string): boolean {
+  return existsSync(join(projectRoot, ".ai-factory", "config.yaml"));
+}
+
+interface ResolvedBaseBranch {
+  branchName: string;
+  createFromRemote: boolean;
+}
+
+function resolveOriginHeadBaseBranch(projectRoot: string): ResolvedBaseBranch | null {
+  const originHeadBranch = getOriginHeadBranch(projectRoot);
+  if (!originHeadBranch) return null;
+  if (branchExists(projectRoot, originHeadBranch)) {
+    return { branchName: originHeadBranch, createFromRemote: false };
+  }
+  if (remoteBranchExists(projectRoot, originHeadBranch)) {
+    return { branchName: originHeadBranch, createFromRemote: true };
+  }
+  return null;
+}
+
+function resolveGitDefaultBaseBranch(
+  projectRoot: string,
+  fallbackBase: string,
+): ResolvedBaseBranch {
+  const originHeadBase = resolveOriginHeadBaseBranch(projectRoot);
+  if (originHeadBase) {
+    log.warn(
+      {
+        projectRoot,
+        configuredBase: fallbackBase,
+        resolvedBase: originHeadBase.branchName,
+        source: "origin/HEAD",
+        createFromRemote: originHeadBase.createFromRemote,
+      },
+      "No project git base branch is configured; using origin default branch",
+    );
+    return originHeadBase;
+  }
+  if (branchExists(projectRoot, "master")) {
+    log.warn(
+      { projectRoot, configuredBase: fallbackBase, resolvedBase: "master" },
+      "No project git base branch is configured; using legacy master branch",
+    );
+    return { branchName: "master", createFromRemote: false };
+  }
+  return { branchName: fallbackBase, createFromRemote: false };
+}
+
+function resolveBaseBranch(
+  projectRoot: string,
+  configuredBase: string,
+  configFileExists: boolean,
+): ResolvedBaseBranch {
+  if (!configFileExists) {
+    return resolveGitDefaultBaseBranch(projectRoot, configuredBase);
+  }
+  if (branchExists(projectRoot, configuredBase)) {
+    return { branchName: configuredBase, createFromRemote: false };
+  }
+  if (configuredBase !== "main") {
+    return { branchName: configuredBase, createFromRemote: false };
+  }
+  const originHeadBase = resolveOriginHeadBaseBranch(projectRoot);
+  if (originHeadBase) {
+    log.warn(
+      {
+        projectRoot,
+        configuredBase,
+        resolvedBase: originHeadBase.branchName,
+        source: "origin/HEAD",
+        createFromRemote: originHeadBase.createFromRemote,
+      },
+      "Configured base branch is missing; falling back to origin default branch",
+    );
+    return originHeadBase;
+  }
+  if (branchExists(projectRoot, "master")) {
+    log.warn(
+      { projectRoot, configuredBase, resolvedBase: "master" },
+      "Configured base branch is missing; falling back to legacy master branch",
+    );
+    return { branchName: "master", createFromRemote: false };
+  }
+  return { branchName: configuredBase, createFromRemote: false };
+}
+
+function handleBaseBranchRefreshResult(input: {
+  projectRoot: string;
+  branchName: string;
+  baseBranch: string;
+  config: AifProjectGit;
+  result: { stdout: string; stderr: string; status: number };
+  operation: string;
+}): void {
+  const { projectRoot, branchName, baseBranch, config, result, operation } = input;
+  if (result.status === 0) return;
+
+  if (config.strict_base_update) {
+    throw new BranchIsolationError(
+      "base_update_failed",
+      `${operation} failed: ${result.stderr || "unknown error"}. ` +
+        `Project has git.strict_base_update=true; refusing to branch from a stale base.`,
+      projectRoot,
+      branchName,
+    );
+  }
+  log.warn(
+    {
+      projectRoot,
+      branchName,
+      baseBranch,
+      stderr: result.stderr,
+    },
+    "Could not fast-forward base branch before creating feature branch; continuing from local base (git.strict_base_update=false)",
+  );
+}
+
+function refreshBaseBranchForWorktree(input: {
+  projectRoot: string;
+  branchName: string;
+  baseBranch: string;
+  config: AifProjectGit;
+}): void {
+  const { projectRoot, branchName, baseBranch, config } = input;
+  const current = getCurrentBranch(projectRoot);
+  const args =
+    current === baseBranch
+      ? ["pull", "--ff-only", "origin", baseBranch]
+      : ["fetch", "origin", `${baseBranch}:${baseBranch}`];
+  const result = runGit(projectRoot, args, { ignoreExit: true });
+  handleBaseBranchRefreshResult({
+    projectRoot,
+    branchName,
+    baseBranch,
+    config,
+    result,
+    operation: `git ${args.join(" ")}`,
+  });
+}
+
 export function projectUsesSharedBranchIsolation(projectRoot: string): boolean {
   const config = resolveGitConfig(projectRoot);
   return config.enabled && config.create_branches && isGitRepo(projectRoot);
+}
+
+export function projectSupportsTaskWorktrees(projectRoot: string): boolean {
+  return projectUsesSharedBranchIsolation(projectRoot);
+}
+
+function copyPathIfExists(source: string, destination: string): void {
+  if (!existsSync(source)) return;
+  mkdirSync(dirname(destination), { recursive: true });
+  cpSync(source, destination, { recursive: true, force: true });
+}
+
+function copyLatestPatchFiles(
+  projectRoot: string,
+  worktreePath: string,
+  patchesPath: string,
+): void {
+  const sourceDir = resolve(projectRoot, patchesPath);
+  if (!existsSync(sourceDir) || !statSync(sourceDir).isDirectory()) return;
+
+  const entries = readdirSync(sourceDir)
+    .map((name) => {
+      const fullPath = join(sourceDir, name);
+      const stats = statSync(fullPath);
+      return { name, fullPath, mtimeMs: stats.mtimeMs, isFile: stats.isFile() };
+    })
+    .filter((entry) => entry.isFile && entry.name !== "patch-cursor.json")
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, 10);
+
+  const destinationDir = resolve(worktreePath, patchesPath);
+  mkdirSync(destinationDir, { recursive: true });
+  for (const entry of entries) {
+    copyPathIfExists(entry.fullPath, join(destinationDir, entry.name));
+  }
+}
+
+function excludeWorktreePath(worktreePath: string, relativePath: string): void {
+  const normalized = relativePath.replaceAll("\\", "/").replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!normalized) return;
+
+  const { stdout, status, stderr } = runGit(
+    worktreePath,
+    ["rev-parse", "--git-path", "info/exclude"],
+    {
+      ignoreExit: true,
+    },
+  );
+  if (status !== 0 || !stdout) {
+    log.warn(
+      { worktreePath, relativePath, stderr },
+      "Could not resolve git exclude path for copied worktree context",
+    );
+    return;
+  }
+
+  const excludePath = resolve(worktreePath, stdout);
+  mkdirSync(dirname(excludePath), { recursive: true });
+  const pattern = `/${normalized}/`;
+  const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
+  if (existing.split("\n").includes(pattern)) return;
+  const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+  appendFileSync(excludePath, `${prefix}# AIF copied planning context\n${pattern}\n`);
+}
+
+function copyProjectContextToWorktree(projectRoot: string, worktreePath: string): void {
+  const cfg = getProjectConfig(projectRoot);
+  const contextFiles = [
+    ".ai-factory/config.yaml",
+    cfg.paths.description,
+    cfg.paths.architecture,
+    cfg.paths.research,
+    "AGENTS.md",
+    "CLAUDE.md",
+  ];
+  const contextDirs = [".claude", ".ai-factory/skill-context"];
+  const requiredParentPaths = [
+    cfg.paths.plan,
+    cfg.paths.fix_plan,
+    cfg.paths.roadmap,
+    cfg.paths.patches,
+    cfg.paths.evolutions,
+    cfg.paths.evolution,
+  ];
+
+  for (const relativePath of requiredParentPaths) {
+    mkdirSync(dirname(resolve(worktreePath, relativePath)), { recursive: true });
+  }
+
+  for (const relativePath of contextFiles) {
+    copyPathIfExists(resolve(projectRoot, relativePath), resolve(worktreePath, relativePath));
+  }
+  for (const relativePath of contextDirs) {
+    copyPathIfExists(resolve(projectRoot, relativePath), resolve(worktreePath, relativePath));
+  }
+  copyLatestPatchFiles(projectRoot, worktreePath, cfg.paths.patches);
+  excludeWorktreePath(worktreePath, cfg.paths.patches);
+}
+
+export function ensureTaskWorktree(input: EnsureTaskWorktreeInput): EnsureTaskWorktreeResult {
+  const { projectRoot, taskId, title, explicitBranchName, explicitWorktreePath } = input;
+  const config = resolveGitConfig(projectRoot);
+
+  if (!config.enabled) {
+    return { action: "skipped", branchName: null, worktreePath: null, reason: "git.enabled=false" };
+  }
+  if (!isGitRepo(projectRoot)) {
+    return {
+      action: "skipped",
+      branchName: null,
+      worktreePath: null,
+      reason: "not a git work tree",
+    };
+  }
+  if (!config.create_branches) {
+    return {
+      action: "skipped",
+      branchName: null,
+      worktreePath: null,
+      reason: "git.create_branches=false",
+    };
+  }
+
+  const branchName = explicitBranchName?.trim()
+    ? explicitBranchName.trim()
+    : buildBranchName(config.branch_prefix, title, taskId);
+  validateBranchName(projectRoot, branchName);
+
+  const worktreePath = explicitWorktreePath?.trim()
+    ? resolve(explicitWorktreePath.trim())
+    : buildTaskWorktreePath(projectRoot, branchName, taskId);
+
+  if (existsSync(worktreePath)) {
+    if (isGitRepo(worktreePath) && getCurrentBranch(worktreePath) === branchName) {
+      copyProjectContextToWorktree(projectRoot, worktreePath);
+      return { action: "reused", branchName, worktreePath };
+    }
+    throw new BranchIsolationError(
+      "worktree_path_collision",
+      `Worktree path ${worktreePath} already exists and is not bound to ${branchName}.`,
+      projectRoot,
+      branchName,
+    );
+  }
+
+  const resolvedBaseBranch = resolveBaseBranch(
+    projectRoot,
+    config.base_branch,
+    hasProjectConfigFile(projectRoot),
+  );
+  const baseRef = resolvedBaseBranch.createFromRemote
+    ? `origin/${resolvedBaseBranch.branchName}`
+    : resolvedBaseBranch.branchName;
+  if (
+    !resolvedBaseBranch.createFromRemote &&
+    !branchExists(projectRoot, resolvedBaseBranch.branchName)
+  ) {
+    throw new BranchIsolationError(
+      "base_branch_unavailable",
+      `Base branch ${resolvedBaseBranch.branchName} does not exist in ${projectRoot}. Cannot create worktree branch ${branchName} from a known base.`,
+      projectRoot,
+      branchName,
+    );
+  }
+
+  if (!branchExists(projectRoot, branchName)) {
+    refreshBaseBranchForWorktree({
+      projectRoot,
+      branchName,
+      baseBranch: resolvedBaseBranch.branchName,
+      config,
+    });
+  }
+
+  const args = branchExists(projectRoot, branchName)
+    ? ["worktree", "add", worktreePath, branchName]
+    : ["worktree", "add", "-b", branchName, worktreePath, baseRef];
+  const { status, stderr } = runGit(projectRoot, args, { ignoreExit: true });
+  if (status !== 0) {
+    throw new BranchIsolationError(
+      "worktree_create_failed",
+      `git ${args.join(" ")} failed: ${stderr || "unknown error"}`,
+      projectRoot,
+      branchName,
+    );
+  }
+
+  copyProjectContextToWorktree(projectRoot, worktreePath);
+  log.info({ projectRoot, worktreePath, branchName, taskId }, "Created task worktree");
+  return { action: "created", branchName, worktreePath };
 }
 
 export function ensureFeatureBranch(input: EnsureFeatureBranchInput): EnsureFeatureBranchResult {
@@ -271,27 +670,61 @@ export function ensureFeatureBranch(input: EnsureFeatureBranchInput): EnsureFeat
   // Step 1: ensure HEAD is on the base branch. We need it both as the
   // create-from-target for `git checkout -b` and as the target of the pull
   // policy below.
-  if (current !== config.base_branch) {
-    if (!branchExists(projectRoot, config.base_branch)) {
-      throw new BranchIsolationError(
-        "base_branch_unavailable",
-        `Base branch ${config.base_branch} does not exist in ${projectRoot}. Cannot create ${branchName} from a known base.`,
+  const resolvedBaseBranch = resolveBaseBranch(
+    projectRoot,
+    config.base_branch,
+    hasProjectConfigFile(projectRoot),
+  );
+  const baseBranch = resolvedBaseBranch.branchName;
+  if (current !== baseBranch) {
+    if (!branchExists(projectRoot, baseBranch)) {
+      if (!resolvedBaseBranch.createFromRemote) {
+        throw new BranchIsolationError(
+          "base_branch_unavailable",
+          `Base branch ${config.base_branch} does not exist in ${projectRoot}. Cannot create ${branchName} from a known base.`,
+          projectRoot,
+          branchName,
+        );
+      }
+      validateBranchName(projectRoot, baseBranch);
+      const { status: trackStatus, stderr: trackErr } = runGit(
         projectRoot,
-        branchName,
+        ["checkout", "--track", "-b", baseBranch, `origin/${baseBranch}`],
+        { ignoreExit: true },
       );
-    }
-    const { status: checkoutStatus, stderr: checkoutErr } = runGit(
-      projectRoot,
-      ["checkout", config.base_branch],
-      { ignoreExit: true },
-    );
-    if (checkoutStatus !== 0) {
-      throw new BranchIsolationError(
-        "base_branch_unavailable",
-        `Could not checkout base branch ${config.base_branch}: ${checkoutErr || "unknown error"}`,
+      if (trackStatus !== 0) {
+        const { status: checkoutRemoteStatus, stderr: checkoutRemoteErr } = runGit(
+          projectRoot,
+          ["checkout", "-b", baseBranch, `origin/${baseBranch}`],
+          { ignoreExit: true },
+        );
+        if (checkoutRemoteStatus !== 0) {
+          throw new BranchIsolationError(
+            "base_branch_unavailable",
+            `Could not create local base branch ${baseBranch} from origin/${baseBranch}: ${trackErr || checkoutRemoteErr || "unknown error"}`,
+            projectRoot,
+            branchName,
+          );
+        }
+      }
+      log.info(
+        { projectRoot, branchName: baseBranch, remoteBranch: `origin/${baseBranch}` },
+        "Created local base branch from origin default branch",
+      );
+    } else {
+      const { status: checkoutStatus, stderr: checkoutErr } = runGit(
         projectRoot,
-        branchName,
+        ["checkout", baseBranch],
+        { ignoreExit: true },
       );
+      if (checkoutStatus !== 0) {
+        throw new BranchIsolationError(
+          "base_branch_unavailable",
+          `Could not checkout base branch ${baseBranch}: ${checkoutErr || "unknown error"}`,
+          projectRoot,
+          branchName,
+        );
+      }
     }
   }
 
@@ -305,29 +738,17 @@ export function ensureFeatureBranch(input: EnsureFeatureBranchInput): EnsureFeat
   // opt into strict mode via `git.strict_base_update: true` — pull failure
   // becomes a hard BranchIsolationError("base_update_failed") classified as
   // blocked_external by the coordinator.
-  const pullResult = runGit(projectRoot, ["pull", "--ff-only", "origin", config.base_branch], {
+  const pullResult = runGit(projectRoot, ["pull", "--ff-only", "origin", baseBranch], {
     ignoreExit: true,
   });
-  if (pullResult.status !== 0) {
-    if (config.strict_base_update) {
-      throw new BranchIsolationError(
-        "base_update_failed",
-        `git pull --ff-only origin ${config.base_branch} failed: ${pullResult.stderr || "unknown error"}. ` +
-          `Project has git.strict_base_update=true; refusing to branch from a stale base.`,
-        projectRoot,
-        branchName,
-      );
-    }
-    log.warn(
-      {
-        projectRoot,
-        branchName,
-        baseBranch: config.base_branch,
-        stderr: pullResult.stderr,
-      },
-      "Could not fast-forward base branch before creating feature branch; continuing from local base (git.strict_base_update=false)",
-    );
-  }
+  handleBaseBranchRefreshResult({
+    projectRoot,
+    branchName,
+    baseBranch,
+    config,
+    result: pullResult,
+    operation: `git pull --ff-only origin ${baseBranch}`,
+  });
 
   const { status, stderr } = runGit(projectRoot, ["checkout", "-b", branchName], {
     ignoreExit: true,

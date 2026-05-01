@@ -171,6 +171,10 @@ PUT /projects/:id
 
 **Response:** `200 OK` — the updated project object.
 
+Parallel auto-queue with `git.create_branches=true` requires
+`AIF_TASK_WORKTREES_ENABLED=true`. With the default `false`, the API rejects
+that combination and the coordinator keeps branch-isolated projects serial.
+
 ### Check Roadmap Status
 
 ```
@@ -276,6 +280,10 @@ clients can update their board indicator.
 ```json
 { "enabled": true }
 ```
+
+Parallel auto-queue with `git.create_branches=true` requires
+`AIF_TASK_WORKTREES_ENABLED=true`. Queued full-mode tasks then receive isolated
+git worktrees when planning starts.
 
 ### Get Project MCP Config
 
