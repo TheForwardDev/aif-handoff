@@ -194,6 +194,39 @@ CLI-specific options:
 
 - `claudeCliPath` — override for the `claude` binary path (default: auto-discovered)
 - `CLAUDE_CLI_PATH` env var — same, via environment
+- `environment` — per-profile environment variables injected into the spawned `claude` subprocess. Useful for pinning `CLAUDE_CONFIG_DIR` so different projects run under different `~/.claude/` home directories (multi-account setups). Values must be strings; non-string entries are silently dropped. Per-call `execution.environment` overrides take precedence over profile-level values.
+
+Multi-account example — one profile per Claude login:
+
+```json
+{
+  "name": "Claude CLI (personal)",
+  "runtimeId": "claude",
+  "providerId": "anthropic",
+  "transport": "cli",
+  "options": {
+    "environment": { "CLAUDE_CONFIG_DIR": "/Users/me/.claude-personal" }
+  },
+  "enabled": true
+}
+```
+
+```json
+{
+  "name": "Claude CLI (work)",
+  "runtimeId": "claude",
+  "providerId": "anthropic",
+  "transport": "cli",
+  "options": {
+    "environment": { "CLAUDE_CONFIG_DIR": "/Users/me/.claude-work" }
+  },
+  "enabled": true
+}
+```
+
+Assign each profile as the default task runtime for a different Handoff project (project settings → runtime profile). Subagents spawned for that project then read credentials, plugins, and history from the matching `~/.claude-*/` directory instead of the shared host `~/.claude/`.
+
+> The same field is honored on the SDK transport via `parseExecutionOptions`, but `CLAUDE_CONFIG_DIR` only affects subprocess-style invocations. For SDK transport, pass per-account `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` via `apiKeyEnvVar` instead.
 
 ### Codex (SDK transport)
 
