@@ -327,13 +327,16 @@ async function requestJson<T>(
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
     };
-    const proxyDispatcher = resolveProxyDispatcher(url);
+    const useLongRunningDispatcher =
+      options.longRunning && getEnv().AIF_RUNTIME_OPENCODE_LONG_RUNNING_DISPATCHER_ENABLED;
+    const proxyDispatcher = resolveProxyDispatcher(
+      url,
+      process.env,
+      useLongRunningDispatcher ? { bodyTimeout: 0, headersTimeout: 0 } : {},
+    );
     if (proxyDispatcher) {
       requestInit.dispatcher = proxyDispatcher;
-    } else if (
-      options.longRunning &&
-      getEnv().AIF_RUNTIME_OPENCODE_LONG_RUNNING_DISPATCHER_ENABLED
-    ) {
+    } else if (useLongRunningDispatcher) {
       requestInit.dispatcher = getLongRunningOpenCodeDispatcher();
     }
 

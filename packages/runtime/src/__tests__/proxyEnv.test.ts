@@ -1,11 +1,26 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveProxyDispatcher, resolveProxyUrlForRequest } from "../proxyEnv.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+function clearProxyEnv() {
+  vi.stubEnv("HTTP_PROXY", undefined);
+  vi.stubEnv("HTTPS_PROXY", undefined);
+  vi.stubEnv("ALL_PROXY", undefined);
+  vi.stubEnv("NO_PROXY", undefined);
+  vi.stubEnv("http_proxy", undefined);
+  vi.stubEnv("https_proxy", undefined);
+  vi.stubEnv("all_proxy", undefined);
+  vi.stubEnv("no_proxy", undefined);
+}
+
 describe("proxy env helpers", () => {
+  beforeEach(() => {
+    clearProxyEnv();
+  });
+
   it("uses protocol-specific proxy before ALL_PROXY", () => {
     const env = {
       HTTPS_PROXY: "http://https-proxy.example:8080",
@@ -28,6 +43,27 @@ describe("proxy env helpers", () => {
       "socks5://proxy.example:1080",
     );
     expect(resolveProxyDispatcher("https://openrouter.ai/api/v1/models")).toBeDefined();
+  });
+
+  it("uses distinct cached dispatchers for long-running proxy timeouts", () => {
+    vi.stubEnv("ALL_PROXY", "http://proxy.example:8080");
+
+    const normalDispatcher = resolveProxyDispatcher("http://127.0.0.1:4096/session");
+    const longRunningDispatcher = resolveProxyDispatcher(
+      "http://127.0.0.1:4096/session/session-1/message",
+      process.env,
+      { bodyTimeout: 0, headersTimeout: 0 },
+    );
+    const cachedLongRunningDispatcher = resolveProxyDispatcher(
+      "http://127.0.0.1:4096/session/session-2/message",
+      process.env,
+      { bodyTimeout: 0, headersTimeout: 0 },
+    );
+
+    expect(normalDispatcher).toBeDefined();
+    expect(longRunningDispatcher).toBeDefined();
+    expect(longRunningDispatcher).toBe(cachedLongRunningDispatcher);
+    expect(longRunningDispatcher).not.toBe(normalDispatcher);
   });
 
   it("honours NO_PROXY hosts, suffixes, ports, and wildcard", () => {

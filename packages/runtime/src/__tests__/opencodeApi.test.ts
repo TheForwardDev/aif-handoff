@@ -156,6 +156,31 @@ describe("OpenCode API transport", () => {
     expect(requestInitAt(1).dispatcher).toBeDefined();
   });
 
+  it("keeps long-running dispatcher settings when session messages use a proxy", async () => {
+    vi.stubEnv("AIF_RUNTIME_OPENCODE_LONG_RUNNING_DISPATCHER_ENABLED", "true");
+    vi.stubEnv("ALL_PROXY", "http://proxy.example:8080");
+    resetEnvCache();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "session-proxy-flag",
+          time: { created: 1710000000, updated: 1710000001 },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          info: { id: "message-proxy-flag", role: "assistant", time: 1710000002 },
+          parts: [{ type: "text", text: "proxied and flagged" }],
+        }),
+      );
+
+    await runOpenCodeApi(createRunInput());
+
+    expect(requestInitAt(0).dispatcher).toBeDefined();
+    expect(requestInitAt(1).dispatcher).toBeDefined();
+    expect(requestInitAt(1).dispatcher).not.toBe(requestInitAt(0).dispatcher);
+  });
+
   it("uses existing session when sessionId is provided", async () => {
     fetchMock
       .mockResolvedValueOnce(

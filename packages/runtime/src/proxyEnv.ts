@@ -1,12 +1,4 @@
-import { createRequire } from "node:module";
-import * as undici from "undici";
-import type { Dispatcher } from "undici";
-
-const require = createRequire(import.meta.url);
-const Socks5ProxyAgent = require("undici/lib/dispatcher/socks5-proxy-agent") as new (
-  proxyUrl: string | URL,
-  options?: Record<string, unknown>,
-) => Dispatcher;
+import { ProxyAgent, type Dispatcher } from "undici";
 
 export const PROXY_ENV_VARS = [
   "HTTP_PROXY",
@@ -24,6 +16,11 @@ export interface RequestInitWithDispatcher extends RequestInit {
 }
 
 const dispatcherCache = new Map<string, Dispatcher>();
+
+export interface ProxyDispatcherOptions {
+  bodyTimeout?: number;
+  headersTimeout?: number;
+}
 
 export function isProxyEnvironmentKey(key: string): boolean {
   return PROXY_ENV_VARS.includes(key as (typeof PROXY_ENV_VARS)[number]);
@@ -51,6 +48,7 @@ export function resolveProxyUrlForRequest(
 export function resolveProxyDispatcher(
   url: string | URL,
   env: NodeJS.ProcessEnv = process.env,
+  options: ProxyDispatcherOptions = {},
 ): Dispatcher | undefined {
   const proxyUrl = resolveProxyUrlForRequest(url, env);
   if (!proxyUrl) {
@@ -58,10 +56,11 @@ export function resolveProxyDispatcher(
   }
 
   const normalizedProxyUrl = normalizeProxyUrl(proxyUrl);
-  let dispatcher = dispatcherCache.get(normalizedProxyUrl);
+  const cacheKey = dispatcherCacheKey(normalizedProxyUrl, options);
+  let dispatcher = dispatcherCache.get(cacheKey);
   if (!dispatcher) {
-    dispatcher = createProxyDispatcher(normalizedProxyUrl);
-    dispatcherCache.set(normalizedProxyUrl, dispatcher);
+    dispatcher = createProxyDispatcher(normalizedProxyUrl, options);
+    dispatcherCache.set(cacheKey, dispatcher);
   }
   return dispatcher;
 }
@@ -75,12 +74,8 @@ export function withProxyDispatcher(
   return dispatcher ? { ...init, dispatcher } : init;
 }
 
-function createProxyDispatcher(proxyUrl: string): Dispatcher {
-  const protocol = new URL(proxyUrl).protocol.toLowerCase();
-  if (protocol === "socks:" || protocol === "socks5:" || protocol === "socks5h:") {
-    return new Socks5ProxyAgent(proxyUrl);
-  }
-  return new undici.ProxyAgent(proxyUrl);
+function createProxyDispatcher(proxyUrl: string, options: ProxyDispatcherOptions): Dispatcher {
+  return new ProxyAgent({ uri: proxyUrl, ...options });
 }
 
 function normalizeProxyUrl(proxyUrl: string): string {
@@ -89,6 +84,10 @@ function normalizeProxyUrl(proxyUrl: string): string {
     parsed.protocol = "socks5:";
   }
   return parsed.toString();
+}
+
+function dispatcherCacheKey(proxyUrl: string, options: ProxyDispatcherOptions): string {
+  return `${proxyUrl}|body=${options.bodyTimeout ?? ""}|headers=${options.headersTimeout ?? ""}`;
 }
 
 function readEnv(value: string | undefined): string | null {
