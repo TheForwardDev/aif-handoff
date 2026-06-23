@@ -287,6 +287,58 @@ describe("normalizeBacklogPositions", () => {
     ]);
   });
 
+  it("does not update a task that leaves backlog after the normalization plan is read", () => {
+    seedTask({
+      id: "stale-task",
+      projectId: "proj-1",
+      title: "Leaves backlog",
+      position: 900,
+      createdAt: "2026-06-23T00:00:01.000Z",
+    });
+    seedTask({
+      id: "remaining-backlog-task",
+      projectId: "proj-1",
+      title: "Still backlog",
+      position: 500,
+      createdAt: "2026-06-23T00:00:02.000Z",
+    });
+
+    const originalTransaction = testDb.current.transaction.bind(testDb.current);
+    const transactionSpy = vi
+      .spyOn(testDb.current, "transaction")
+      .mockImplementation(((callback) => {
+        testDb.current
+          .update(tasks)
+          .set({ status: "planning" })
+          .where(eq(tasks.id, "stale-task"))
+          .run();
+
+        return originalTransaction(callback);
+      }) as typeof testDb.current.transaction);
+
+    const result = normalizeBacklogPositions({ projectId: "proj-1", apply: true });
+
+    transactionSpy.mockRestore();
+
+    expect(result.applied).toBe(true);
+    expect(result.changedTaskCount).toBe(2);
+    expect(result.updatedTaskCount).toBe(1);
+    expect(listProjectTasks("proj-1")).toEqual([
+      {
+        id: "stale-task",
+        status: "planning",
+        position: 900,
+        createdAt: "2026-06-23T00:00:01.000Z",
+      },
+      {
+        id: "remaining-backlog-task",
+        status: "backlog",
+        position: 200,
+        createdAt: "2026-06-23T00:00:02.000Z",
+      },
+    ]);
+  });
+
   it("prints CLI help and supports project-scoped dry-run previews", async () => {
     const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 

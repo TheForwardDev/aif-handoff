@@ -149,19 +149,31 @@ export function normalizeBacklogPositions(
     "Applying backlog normalization will overwrite any manual backlog order",
   );
 
-  getDb().transaction((tx) => {
+  const updatedTaskCount = getDb().transaction((tx) => {
+    let updatedTaskCount = 0;
+
     for (const task of changedTasks) {
-      tx.update(tasks)
+      const result = tx
+        .update(tasks)
         .set({ position: task.normalizedPosition })
-        .where(eq(tasks.id, task.id))
+        .where(
+          and(
+            eq(tasks.id, task.id),
+            eq(tasks.projectId, task.projectId),
+            eq(tasks.status, "backlog"),
+          ),
+        )
         .run();
+      updatedTaskCount += result.changes;
     }
+
+    return updatedTaskCount;
   });
 
   return {
     ...plan,
     applied: true,
-    updatedTaskCount: changedTasks.length,
+    updatedTaskCount,
   };
 }
 
